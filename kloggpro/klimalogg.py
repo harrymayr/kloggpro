@@ -751,7 +751,7 @@ class CommunicationService(object):
             newlen, newbuf = self.buildACKFrame(buf, ACTION_GET_HISTORY, cs)
         return newlen, newbuf
 
-    def generateResponse(self, length, buf):
+    async def generateResponse(self, length, buf):
         if DEBUG_COMM > 1:
             logdbg('generateResponse: %s' % self.timing())
         if length == 0:
@@ -788,7 +788,7 @@ class CommunicationService(object):
                     raise BadResponse('len=%x resp=%x' % (length, respType))
             elif respType == RESPONSE_GET_HISTORY:
                 if length == 0xB5:  # 181
-                    newlen, newbuf = self.handleHistoryData(length, buf)
+                    newlen, newbuf = await self.handleHistoryData(length, buf)
                 else:
                     raise BadResponse('len=%x resp=%x' % (length, respType))
             elif respType == RESPONSE_REQUEST:
@@ -992,10 +992,14 @@ class CommunicationService(object):
             return
         logdbg('startRFThread: spawning RF thread')
         self.running = True
-        self.child = threading.Thread(target=self.doRF)
+        #self.child = threading.Thread(target=self.doRF)
+        self.child = threading.Thread(target=self.run_async, args=(self.doRF(),))
         self.child.setName('RFComm')
         self.child.setDaemon(True)
         self.child.start()
+    
+    def run_async(self, coro):
+        asyncio.run(coro)
 
     def stopRFThread(self):
         self.running = False
@@ -1013,13 +1017,13 @@ class CommunicationService(object):
     async def doRF(self):
         try:
             logdbg('setting up rf communication')
-            self.doRFSetup()
+            await self.doRFSetup()
             # wait for genStartupRecords or show_current to start
             while self.history_cache.wait_at_start == 1:
                 await asyncio.sleep(1)
             loginf("starting rf communication")
             while self.running:
-                self.doRFCommunication()
+                await self.doRFCommunication()
         except Exception as e:
             logerr('exception in doRF: %s' % e)
             self.running = False
@@ -1064,7 +1068,7 @@ class CommunicationService(object):
 
         framelen, framebuf = self.hid.getFrame()
         try:
-            framelen, framebuf = self.generateResponse(framelen, framebuf)
+            framelen, framebuf = await self.generateResponse(framelen, framebuf)
             self.hid.setFrame(framelen, framebuf)
             self.hid.setTX()
         except DataWritten:
@@ -2331,20 +2335,20 @@ class Transceiver(object):
         self.timeout = 1000
         self.last_dump = None
 
-    def open(self, vid, pid, serial):
-        device = Transceiver._find_device(vid, pid, serial)
+    async def open(self, vid, pid, serial):
+        device = await Transceiver._find_device(vid, pid, serial)
         if device is None:
             logerr('Cannot find USB device with Vendor=0x%04x ProdID=0x%04x Serial=%s' % 
                    (vid, pid, serial))
             raise NameError('Unable to find transceiver on USB')
-        self.devh = self._open_device(device)
+        self.devh = await self._open_device(device)
 
     def close(self):
         Transceiver._close_device(self.devh)
         self.devh = None
 
     @staticmethod
-    def _find_device(vid, pid, serial):
+    async def _find_device(vid, pid, serial):
         for bus in usb.busses():
             for dev in bus.devices:
                 if dev.idVendor == vid and dev.idProduct == pid:
@@ -2353,7 +2357,7 @@ class Transceiver(object):
                                bus.dirname, dev.filename))
                         return dev
                     else:
-                        sn = Transceiver._read_serial(dev)
+                        sn = await Transceiver._read_serial(dev)
                         if str(serial) == sn:
                             logdbg('found transceiver at bus=%s device=%s serial=%s' %
                                    (bus.dirname, dev.filename, sn))
@@ -2364,14 +2368,14 @@ class Transceiver(object):
         return None
 
     @staticmethod
-    def _read_serial(dev):
+    async def _read_serial(dev):
         handle = None
         try:
             # see if we can read the serial without claiming the interface.
             # we do not want to disrupt any process that might already be
             # using the device.
-            handle = Transceiver._open_device(dev)
-            buf = Transceiver.readCfg(handle, 0x1F9, 7)
+            handle = await Transceiver._open_device(dev)
+            buf = await Transceiver.readCfg(handle, 0x1F9, 7)
             if buf:
                 return ''.join(['%02d' % x for x in buf[0:7]])
         except usb.USBError as e:
@@ -2386,7 +2390,7 @@ class Transceiver(object):
 
     @staticmethod
     async def _open_device(dev, interface=0):
-        handle = dev.open()
+        handle = await dev.open()
         if not handle:
             raise NameError('Open USB device failed')
 
@@ -2637,7 +2641,7 @@ class Transceiver(object):
             self.last_dump = None
 
     @staticmethod
-    def readCfg(handle, addr, nbytes, timeout=1000):
+    async def readCfg(handle, addr, nbytes, timeout=1000):
         new_data = [0] * 0x15
         while nbytes:
             buf = [0xcc] * 0x0f  # 0x15
