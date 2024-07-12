@@ -34,6 +34,7 @@ import threading
 import time
 import traceback
 import usb
+import asyncio
 from io import StringIO
 
 DRIVER_NAME = 'KlimaLogg'
@@ -513,7 +514,7 @@ class CommunicationService(object):
     # eldest valid timestamp for history record
     TS_2010_07 = tstr_to_ts(str(datetime(2010, 7, 1, 0, 0)))
 
-    def handleHistoryData(self, length, buf):
+    async def handleHistoryData(self, length, buf):
         if DEBUG_HISTORY_DATA > 1:
             logdbg('handleHistoryData: %s' % self.timing())
 
@@ -693,7 +694,7 @@ class CommunicationService(object):
                                         logdbg('handleHistoryData: record at Pos%d'
                                                ' handled in next batch' %
                                                (x))
-                                        time.sleep(20)
+                                        await asyncio.sleep(20)
                             # Check if this record is too old or has no date
                             elif tsCurrentRec < self.TS_2010_07:
                                 logerr('handleHistoryData: skippd record at Pos%d tsCurrentRec=None DT is too old' % x)
@@ -750,7 +751,7 @@ class CommunicationService(object):
             newlen, newbuf = self.buildACKFrame(buf, ACTION_GET_HISTORY, cs)
         return newlen, newbuf
 
-    def generateResponse(self, length, buf):
+    async def generateResponse(self, length, buf):
         if DEBUG_COMM > 1:
             logdbg('generateResponse: %s' % self.timing())
         if length == 0:
@@ -787,7 +788,7 @@ class CommunicationService(object):
                     raise BadResponse('len=%x resp=%x' % (length, respType))
             elif respType == RESPONSE_GET_HISTORY:
                 if length == 0xB5:  # 181
-                    newlen, newbuf = self.handleHistoryData(length, buf)
+                    newlen, newbuf = await self.handleHistoryData(length, buf)
                 else:
                     raise BadResponse('len=%x resp=%x' % (length, respType))
             elif respType == RESPONSE_REQUEST:
@@ -904,14 +905,14 @@ class CommunicationService(object):
         for r in self.reg_names:
             self.hid.writeReg(r, self.reg_names[r])
 
-    def setup(self, frequency_standard, comm_interval,
+    async def setup(self, frequency_standard, comm_interval,
               logger_channel, vendor_id, product_id, serial):
         loginf("comm_interval is %s" % comm_interval)
         loginf("logger_channel is %s" % logger_channel)
         self.comm_mode_interval = comm_interval
         self.logger_id = logger_channel - 1
         self.config_serial = serial
-        self.hid.open(vendor_id, product_id, serial)
+        await self.hid.open(vendor_id, product_id, serial)
         self.initTransceiver(frequency_standard)
         self.transceiver_present = True
 
@@ -991,10 +992,14 @@ class CommunicationService(object):
             return
         logdbg('startRFThread: spawning RF thread')
         self.running = True
-        self.child = threading.Thread(target=self.doRF)
+        #self.child = threading.Thread(target=self.doRF)
+        self.child = threading.Thread(target=self.run_async, args=(self.doRF(),))
         self.child.setName('RFComm')
         self.child.setDaemon(True)
         self.child.start()
+    
+    def run_async(self, coro):
+        asyncio.run(coro)
 
     def stopRFThread(self):
         self.running = False
@@ -1009,16 +1014,16 @@ class CommunicationService(object):
     def isRunning(self):
         return self.running
 
-    def doRF(self):
+    async def doRF(self):
         try:
             logdbg('setting up rf communication')
-            self.doRFSetup()
+            await self.doRFSetup()
             # wait for genStartupRecords or show_current to start
             while self.history_cache.wait_at_start == 1:
-                time.sleep(1)
+                await asyncio.sleep(1)
             loginf("starting rf communication")
             while self.running:
-                self.doRFCommunication()
+                await self.doRFCommunication()
         except Exception as e:
             logerr('exception in doRF: %s' % e)
             self.running = False
@@ -1030,21 +1035,21 @@ class CommunicationService(object):
     # however, HeavyWeatherPro seems to do it this way on a first time config.
     # doing it this way makes configuration easier during a factory reset and
     # when re-establishing communication with the station sensors.
-    def doRFSetup(self):
+    async def doRFSetup(self):
         self.hid.execute(5)
         self.hid.setPreamblePattern(0xaa)
         self.hid.setState(0)
-        time.sleep(1)
+        await asyncio.sleep(1)
         self.hid.setRX()
 
         self.hid.setPreamblePattern(0xaa)
         self.hid.setState(0x1e)
-        time.sleep(1)
+        await asyncio.sleep(1)
         self.hid.setRX()
         self.setSleep(0.075, 0.005)
 
-    def doRFCommunication(self):
-        time.sleep(self.firstSleep)
+    async def doRFCommunication(self):
+        await asyncio.sleep(self.firstSleep)
         self.pollCount = 0
         while self.running:
             statebuf = [0] * 2
@@ -1052,18 +1057,18 @@ class CommunicationService(object):
                 statebuf = self.hid.getState()
             except Exception as e:
                 logerr('getState failed: %s' % e)
-                time.sleep(5)
+                await asyncio.sleep(5)
                 pass
             self.pollCount += 1
             if statebuf[0] == 0x16:
                 break
-            time.sleep(self.nextSleep)
+            await asyncio.sleep(self.nextSleep)
         else:
             return
 
         framelen, framebuf = self.hid.getFrame()
         try:
-            framelen, framebuf = self.generateResponse(framelen, framebuf)
+            framelen, framebuf = await self.generateResponse(framelen, framebuf)
             self.hid.setFrame(framelen, framebuf)
             self.hid.setTX()
         except DataWritten:
@@ -1615,7 +1620,7 @@ class KlimaLoggDriver():
         self.values = dict()
         for i in range(1, 9):
             self.values['sensor_text%d' % i] = None
-        self.critical_alerts = stn_dict.get('critical_alerts', "log")
+        self.critical_alerts = "log"
         loginf('critical alerts are reported via "log"')
 
         now = int(time.time())
@@ -1630,9 +1635,10 @@ class KlimaLoggDriver():
         self._empty_packet_count = 0
 
 
-        self.startUp()
+        #self.startUp()
+        asyncio.ensure_future(self.startUp())
 
-    def show_history(self, maxtries, ts=0, count=0):
+    async def show_history(self, maxtries, ts=0, count=0):
         """Display the indicated number of records or the records since the 
         specified timestamp (local time, in seconds)"""
         print("Querying the station for historical records...")
@@ -1644,7 +1650,7 @@ class KlimaLoggDriver():
             if ntries >= maxtries:
                 print('Giving up after %d tries' % ntries)
                 break
-            time.sleep(30)
+            await asyncio.sleep(30)
             ntries += 1
             now = int(time.time())
             n = self.get_next_history_index()
@@ -1675,7 +1681,7 @@ class KlimaLoggDriver():
     def closePort(self):
         self.shutDown()
 
-    def genLoopPackets(self):
+    async def genLoopPackets(self):
         """Generator function that continuously returns decoded packets."""
         while True:
             self._packet_count += 1
@@ -1736,9 +1742,9 @@ class KlimaLoggDriver():
                     self._last_contact_log_ts = now
 
             yield packet
-            time.sleep(self.polling_interval)                    
+            await asyncio.sleep(self.polling_interval)                    
 
-    def genStartupRecords(self, ts):
+    async def genStartupRecords(self, ts):
         loginf('Scanning historical records')
         self.clear_wait_at_start()  # let rf communication start
         first_ts = ts
@@ -1757,7 +1763,7 @@ class KlimaLoggDriver():
                 if ntries >= maxtries:
                     logerr('No historical data after %d tries' % ntries)
                     return
-                time.sleep(15)
+                await asyncio.sleep(15)
                 ntries += 1
                 now = int(time.time())
                 n = self.get_cached_history_count()
@@ -1832,13 +1838,13 @@ class KlimaLoggDriver():
             else:
                 store_period = 0
 
-    def startUp(self):
+    async def startUp(self):
         if self._service is not None:
             return
         self._service = CommunicationService(self.first_sleep, self.values,
                                              self.max_history_records,
                                              self.batch_size)
-        self._service.setup(self.frequency, self.comm_interval,
+        await self._service.setup(self.frequency, self.comm_interval,
                             self.logger_channel, self.vendor_id,
                             self.product_id, self.config_serial)
         self._service.startRFThread()
@@ -2330,20 +2336,20 @@ class Transceiver(object):
         self.timeout = 1000
         self.last_dump = None
 
-    def open(self, vid, pid, serial):
-        device = Transceiver._find_device(vid, pid, serial)
+    async def open(self, vid, pid, serial):
+        device = await Transceiver._find_device(vid, pid, serial)
         if device is None:
             logerr('Cannot find USB device with Vendor=0x%04x ProdID=0x%04x Serial=%s' % 
                    (vid, pid, serial))
             raise NameError('Unable to find transceiver on USB')
-        self.devh = self._open_device(device)
+        self.devh = await self._open_device(device)
 
     def close(self):
         Transceiver._close_device(self.devh)
         self.devh = None
 
     @staticmethod
-    def _find_device(vid, pid, serial):
+    async def _find_device(vid, pid, serial):
         for bus in usb.busses():
             for dev in bus.devices:
                 if dev.idVendor == vid and dev.idProduct == pid:
@@ -2352,7 +2358,7 @@ class Transceiver(object):
                                bus.dirname, dev.filename))
                         return dev
                     else:
-                        sn = Transceiver._read_serial(dev)
+                        sn = await Transceiver._read_serial(dev)
                         if str(serial) == sn:
                             logdbg('found transceiver at bus=%s device=%s serial=%s' %
                                    (bus.dirname, dev.filename, sn))
@@ -2363,14 +2369,14 @@ class Transceiver(object):
         return None
 
     @staticmethod
-    def _read_serial(dev):
+    async def _read_serial(dev):
         handle = None
         try:
             # see if we can read the serial without claiming the interface.
             # we do not want to disrupt any process that might already be
             # using the device.
-            handle = Transceiver._open_device(dev)
-            buf = Transceiver.readCfg(handle, 0x1F9, 7)
+            handle = await Transceiver._open_device(dev)
+            buf = await Transceiver.readCfg(handle, 0x1F9, 7)
             if buf:
                 return ''.join(['%02d' % x for x in buf[0:7]])
         except usb.USBError as e:
@@ -2384,7 +2390,7 @@ class Transceiver(object):
         return None
 
     @staticmethod
-    def _open_device(dev, interface=0):
+    async def _open_device(dev, interface=0):
         handle = dev.open()
         if not handle:
             raise NameError('Open USB device failed')
@@ -2413,16 +2419,16 @@ class Transceiver(object):
         # FIXME: check return values
         usb_wait = 0.05
         handle.getDescriptor(0x1, 0, 0x12)
-        time.sleep(usb_wait)
+        await asyncio.sleep(usb_wait)
         handle.getDescriptor(0x2, 0, 0x9)
-        time.sleep(usb_wait)
+        await asyncio.sleep(usb_wait)
         handle.getDescriptor(0x2, 0, 0x22)
-        time.sleep(usb_wait)
+        await asyncio.sleep(usb_wait)
         handle.controlMsg(usb.TYPE_CLASS + usb.RECIP_INTERFACE,
                           0xa, [], 0x0, 0x0, 1000)
-        time.sleep(usb_wait)
+        await asyncio.sleep(usb_wait)
         handle.getDescriptor(0x22, 0, 0x2a9)
-        time.sleep(usb_wait)
+        await asyncio.sleep(usb_wait)
         return handle
 
     @staticmethod
@@ -2636,7 +2642,7 @@ class Transceiver(object):
             self.last_dump = None
 
     @staticmethod
-    def readCfg(handle, addr, nbytes, timeout=1000):
+    async def readCfg(handle, addr, nbytes, timeout=1000):
         new_data = [0] * 0x15
         while nbytes:
             buf = [0xcc] * 0x0f  # 0x15
