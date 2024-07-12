@@ -905,14 +905,14 @@ class CommunicationService(object):
         for r in self.reg_names:
             self.hid.writeReg(r, self.reg_names[r])
 
-    def setup(self, frequency_standard, comm_interval,
+    async def setup(self, frequency_standard, comm_interval,
               logger_channel, vendor_id, product_id, serial):
         loginf("comm_interval is %s" % comm_interval)
         loginf("logger_channel is %s" % logger_channel)
         self.comm_mode_interval = comm_interval
         self.logger_id = logger_channel - 1
         self.config_serial = serial
-        self.hid.open(vendor_id, product_id, serial)
+        await self.hid.open(vendor_id, product_id, serial)
         self.initTransceiver(frequency_standard)
         self.transceiver_present = True
 
@@ -1635,7 +1635,8 @@ class KlimaLoggDriver():
         self._empty_packet_count = 0
 
 
-        self.startUp()
+        #self.startUp()
+        asyncio.ensure_future(self.startUp())
 
     async def show_history(self, maxtries, ts=0, count=0):
         """Display the indicated number of records or the records since the 
@@ -1837,13 +1838,13 @@ class KlimaLoggDriver():
             else:
                 store_period = 0
 
-    def startUp(self):
+    async def startUp(self):
         if self._service is not None:
             return
         self._service = CommunicationService(self.first_sleep, self.values,
                                              self.max_history_records,
                                              self.batch_size)
-        self._service.setup(self.frequency, self.comm_interval,
+        await self._service.setup(self.frequency, self.comm_interval,
                             self.logger_channel, self.vendor_id,
                             self.product_id, self.config_serial)
         self._service.startRFThread()
@@ -2390,7 +2391,7 @@ class Transceiver(object):
 
     @staticmethod
     async def _open_device(dev, interface=0):
-        handle = await dev.open()
+        handle = dev.open()
         if not handle:
             raise NameError('Open USB device failed')
 
