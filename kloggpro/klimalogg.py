@@ -1974,6 +1974,7 @@ class CurrentData(object):
         self.values = dict()
         self.values['timestamp'] = None
         self.values['SignalQuality'] = None
+        self.values['AlarmData'] = None
         for i in range(0, 9):
             self.values['Temp%d' % i] = SensorLimits.temperature_NP
             self.values['Temp%dMax' % i] = SensorLimits.temperature_NP
